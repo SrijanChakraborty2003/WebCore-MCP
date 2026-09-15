@@ -7,6 +7,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 from app.browser import logger, DEFAULT_USER_AGENT
 from app.config import settings
+from app.captcha_solver import VisionCaptchaSolver
 from app.parsers import format_text_success, format_error
 from app.providers.base import BrowserProvider
 
@@ -87,16 +88,10 @@ class DeepSeekBrowser(BrowserProvider):
         self.driver.get(self.base_url)
         time.sleep(2.5)
 
-        # Wait if verification challenge is active
+        # Handle security challenge if active
         if self._is_captcha_active():
-            logger.info(f"[{self.provider_name}] Verification challenge detected. Waiting for auto-solve extension...")
-            wait_end = time.time() + 12.0
-            while time.time() < wait_end:
-                time.sleep(1.0)
-                if not self._is_captcha_active():
-                    logger.info(f"[{self.provider_name}] Challenge resolved!")
-                    time.sleep(1.5)
-                    break
+            logger.info(f"[{self.provider_name}] Verification challenge detected. Activating VisionCaptchaSolver...")
+            VisionCaptchaSolver.solve_if_needed(self.driver, timeout=30)
 
         self._dismiss_banners()
 

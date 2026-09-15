@@ -19,6 +19,7 @@ from selenium.common.exceptions import (
 
 from app.browser import logger
 from app.config import settings
+from app.captcha_solver import VisionCaptchaSolver
 from app.parsers import format_text_success, format_image_success, format_error
 from app.providers.base import BrowserProvider
 
@@ -458,6 +459,9 @@ class GeminiBrowser(BrowserProvider):
         self.driver.get(self.base_url)
         # Short wait to let the single page app initialize
         time.sleep(1.5)
+        if VisionCaptchaSolver.is_captcha_present(self.driver):
+            logger.info(f"[{self.provider_name}] Security challenge / CAPTCHA detected. Activating VisionCaptchaSolver...")
+            VisionCaptchaSolver.solve_if_needed(self.driver, timeout=25)
 
     def _find_input_element(self, timeout: int = 15):
         """Find the Gemini prompt input element using candidate selectors."""
@@ -473,6 +477,10 @@ class GeminiBrowser(BrowserProvider):
 
         end_time = time.time() + timeout
         while time.time() < end_time:
+            if VisionCaptchaSolver.is_captcha_present(self.driver):
+                logger.info(f"[{self.provider_name}] CAPTCHA detected while locating input. Solving...")
+                VisionCaptchaSolver.solve_if_needed(self.driver, timeout=25)
+
             for by, sel in self.INPUT_SELECTORS:
                 try:
                     elements = self.driver.find_elements(by, sel)

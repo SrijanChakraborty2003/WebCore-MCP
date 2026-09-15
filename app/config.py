@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     debugger_host: str = "127.0.0.1"
     debugger_port: int = 9222
     chrome_profile_dir: str = "C:\\mcp-browser-profile"
-    chrome_headless: bool = True
+    chrome_headless: bool = False
 
     @property
     def debugger_address(self) -> str:
@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     default_timeout: int = 120
     page_load_timeout: int = 30
     element_timeout: int = 20
+
+    # Ollama & Vision CAPTCHA Solver Settings
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_vision_model: str = "gemma4:31b-cloud"
+    enable_vision_captcha_solver: bool = True
 
     # Paths
     base_dir: Path = BASE_DIR

@@ -55,6 +55,12 @@ async def health_check() -> Dict[str, Any]:
             "deepseek": {"url": settings.deepseek_url, "ready": False, "auth_status": "unknown"},
             "google": {"url": "https://www.google.com", "ready": True, "auth_status": "not_required"},
         },
+        "captcha_solver": {
+            "type": "browser-use (ollama vision)",
+            "enabled": settings.enable_vision_captcha_solver,
+            "ollama_endpoint": settings.ollama_base_url,
+            "vision_model": settings.ollama_vision_model,
+        },
     }
 
     if chrome_status["running"]:

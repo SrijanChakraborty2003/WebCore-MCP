@@ -1,226 +1,339 @@
-# Browser-Based Multi-Provider MCP Server (Chrome + Selenium + FastMCP)
+# Browser-Based Multi-Provider MCP Server
 
-A local FastMCP server that controls an authenticated Google Chrome browser via remote debugging (`127.0.0.1:9222`). It provides seamless Model Context Protocol (MCP) tools for **Google Search**, **Google Gemini**, **ChatGPT (with Web Search & DALL-E 3)**, **Claude**, and **DeepSeek (with Web Search & DeepThink)** without requiring paid API keys for each provider.
-
----
-
-## 🧠 How It Works
-
-```
-   ┌─────────────────────────────────────────────────────────┐
-   │            MCP Client / AI Agent / test.py              │
-   └────────────────────────────┬────────────────────────────┘
-                                │ (SSE on :8000 or stdio)
-   ┌────────────────────────────▼────────────────────────────┐
-   │              FastMCP Server (server.py)                 │
-   │  - 11 Exposed Tools                                     │
-   │  - Async Concurrency Lock (Sequential Tab Safety)       │
-   └────────────────────────────┬────────────────────────────┘
-                                │ Selenium WebDriver + CDP
-   ┌────────────────────────────▼────────────────────────────┐
-   │         Google Chrome (Headless Auto-Launch)            │
-   │  - Remote Debugging: 127.0.0.1:9222                     │
-   │  - Persistent Profile: C:\mcp-browser-profile           │
-   │  - Stealth Flags (No 'HeadlessChrome' User-Agent)       │
-   │  - Auto-CAPTCHA Solver Extension (NopeCHA)              │
-   └──────┬──────────────┬──────────────┬─────────────┬──────┤
-          │              │              │             │      │
-          ▼              ▼              ▼             ▼      ▼
-     Google Search  Gemini Web     ChatGPT Web   Claude Web  DeepSeek Web
-```
-
-1. **Auto-Launched Headless Browser**: When you start `server.py`, it automatically launches Chrome in the background with `--headless=new`, a realistic desktop User-Agent, and `--disable-blink-features=AutomationControlled`. You don't need to manually start Chrome!
-2. **Session & Cookie Persistence**: Chrome uses a dedicated, persistent user profile directory (`C:\mcp-browser-profile`). Once you log into your accounts, you stay logged in indefinitely.
-3. **No Context Contamination**: Each request opens a clean chat session (`new_chat()`) to prevent credit bleed and context cross-talk.
-4. **Cloudflare & Anti-Bot Defense**: Chrome DevTools Protocol (CDP) overrides mask `navigator.webdriver`. The installed **NopeCHA** extension automatically handles Cloudflare Turnstile challenges in the background.
-5. **Direct Image Pipeline**: Image generation requests (Gemini Imagen diffusion or ChatGPT DALL-E 3) track render progress and extract full-resolution PNGs directly into `data/outputs/`.
+> A production-grade, local Model Context Protocol (MCP) server that connects AI clients (Claude Desktop, Cursor, Antigravity IDE, etc.) directly to live web instances of **Google Search**, **Google Gemini**, **ChatGPT**, **Claude**, and **DeepSeek** via an automated Chrome instance. **No paid API keys required.**
 
 ---
 
-## 🛠️ First-Time Setup (One-Time Only)
+## 📑 Table of Contents
+1. [Project Overview](#-project-overview)
+2. [High-Level Architecture](#-high-level-architecture)
+3. [End-to-End Execution Flow](#-end-to-end-execution-flow)
+4. [Autonomous Vision CAPTCHA Solver](#-autonomous-vision-captcha-solver)
+5. [Provider Implementation Matrix](#-provider-implementation-matrix)
+6. [First-Time Setup Guide](#-first-time-setup-guide)
+7. [Running the MCP Server](#-running-the-mcp-server)
+8. [MCP Client Configuration](#-mcp-client-configuration)
+9. [Available MCP Tools Reference](#-available-mcp-tools-reference)
+10. [CLI Testing Suite](#-cli-testing-suite)
+11. [Project Directory Structure](#-project-directory-structure)
+12. [Troubleshooting & FAQ](#-troubleshooting--faq)
 
-Before running the server headlessly, you need to log into your accounts once in a visible browser window and install the CAPTCHA-solving extension.
+---
 
-### Step 1: Install Python Dependencies
-Open your terminal (in your Anaconda or virtual environment):
+## 🌟 Project Overview
+
+API subscriptions for multiple AI providers (OpenAI, Anthropic, Google Cloud, DeepSeek) are expensive and carry strict rate limits. Meanwhile, individual users typically already have web subscriptions (or free accounts) on these platforms.
+
+This project bridges that gap by running a **FastMCP server** that drives an authenticated Google Chrome browser over the **Chrome DevTools Protocol (CDP)** and **Selenium WebDriver**:
+- **Zero API Costs**: Uses your existing browser sessions and cookies stored in a persistent profile.
+- **Unified Interface**: Exposes 11 standard MCP tools covering conversational chat, real-time web search (with AI overviews and citations), and live image generation.
+- **Autonomous CAPTCHA Bypassing**: Integrates a two-tier challenge solver powered by `browser-use` and local/cloud **Ollama Vision (`gemma4:31b-cloud`)** to solve Cloudflare Turnstile verification challenges automatically without paid third-party solver extensions.
+- **Strict Tab & Session Isolation**: Emulates fresh chats on every query, preventing context contamination and history pollution.
+
+---
+
+## 🏗️ High-Level Architecture
+
+```
+ ┌─────────────────────────────────────────────────────────────────────────────┐
+ │                       AI Clients & MCP Consumers                            │
+ │          (Claude Desktop, Cursor, Antigravity IDE, CLI / test.py)           │
+ └──────────────────────────────────────┬──────────────────────────────────────┘
+                                        │ (SSE on :8000 or stdio)
+ ┌──────────────────────────────────────▼──────────────────────────────────────┐
+ │                      FastMCP Server (server.py)                             │
+ │  - 11 Registered Tools                                                      │
+ │  - Asynchronous Reentrancy Lock (`browser_lock`)                            │
+ │  - Error Normalization & Structured JSON Output Formatting                  │
+ └──────────────────────────────────────┬──────────────────────────────────────┘
+                                        │ Python WebDriver + CDP
+ ┌──────────────────────────────────────▼──────────────────────────────────────┐
+ │               Browser Manager & Infrastructure (app/browser.py)             │
+ │  - Chrome Auto-Launch on Port 9222 (Headless or Headed)                     │
+ │  - Persistent Profile: C:\mcp-browser-profile                               │
+ │  - Prototype Stealth Injections (Overrides `navigator.webdriver`)           │
+ │  - SSL Intercept Bypass (`--ignore-certificate-errors`)                     │
+ └──────────────────────────────────────┬──────────────────────────────────────┘
+                                        │
+           ┌────────────────────────────┼────────────────────────────┐
+           ▼                            ▼                            ▼
+ ┌───────────────────┐        ┌───────────────────┐        ┌───────────────────┐
+ │ Provider Engines  │        │ Direct Web Search │        │  CAPTCHA Defense  │
+ │ (app/providers/)  │        │ (google.py)       │        │ (captcha_solver)  │
+ ├───────────────────┤        ├───────────────────┤        ├───────────────────┤
+ │ • gemini.py       │        │ • Organic Scraper │        │ • Fast DOM Click  │
+ │ • chatgpt.py      │        │ • AI Overview     │        │ • browser-use +   │
+ │ • claude.py       │        │ • Query Citations │        │   Ollama Vision   │
+ │ • deepseek.py     │        │                   │        │   (gemma4:31b)    │
+ └───────────────────┘        └───────────────────┘        └───────────────────┘
+```
+
+---
+
+## 🔄 End-to-End Execution Flow
+
+Every request dispatched to the server follows a strict, deterministic sequence:
+
+```
+[1. Request Arrives]  -->  MCP Tool invoked (e.g. ask_chatgpt, ask_claude)
+         │
+[2. Concurrency Lock] -->  Acquire `browser_lock` (ensures single-tab execution safety)
+         │
+[3. Browser Health]   -->  Ensure Chrome is alive on 127.0.0.1:9222; auto-start if down
+         │
+[4. Tab Isolation]    -->  Provider activates or opens its designated tab (e.g. chatgpt.com)
+         │
+[5. Anti-Bot Gate]    -->  `VisionCaptchaSolver.is_captcha_present()` runs:
+         │                 ├── Not Present: Continue instantly (< 1ms latency)
+         │                 └── Present:
+         │                      ├── Tier 1: Instant JavaScript DOM click (1-2s)
+         │                      └── Tier 2: Escalate to browser-use + Ollama Vision
+         │
+[6. DOM Input]        -->  Inject prompt using provider-specific rich-text strategy:
+         │                 • Gemini: Quill `document.execCommand('insertText')`
+         │                 • ChatGPT: TipTap contenteditable innerHTML dispatch
+         │                 • Claude: ProseMirror event synthesizer
+         │                 • DeepSeek: Native JavaScript HTMLTextAreaElement prototype
+         │
+[7. Generation Wait]  -->  Poll generation indicator (stop button, pulse animation, or shimmer)
+         │
+[8. Extraction]       -->  Extract sanitized Markdown text, search citations, or full-res PNG
+         │
+[9. Return & Release] -->  Format standardized JSON envelope, release `browser_lock`
+```
+
+---
+
+## 🛡️ Autonomous Vision CAPTCHA Solver
+
+Security verification challenges (such as Cloudflare Turnstile's *"Verify you are human"*) can block automated browsers. Instead of relying on paid, third-party browser extensions (NopeCHA, Buster, 2Captcha), this server incorporates an **autonomous vision solver**:
+
+```
+                  Challenge Detected on Page
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+       [Tier 1: Fast DOM]            [Challenge Persists?]
+   Direct click on Turnstile iframe           │ Yes
+   or verify button via JavaScript            ▼
+              │                     [Tier 2: Vision Escalation]
+          Cleared?               Attach browser-use via CDP
+         /        \              Snapshot DOM & Viewport
+      Yes          No            Pass screenshot to Ollama (gemma4:31b)
+      │             │                         │
+   Resume       Escalate                      ▼
+                           Model spots checkbox -> outputs click action
+                                              │
+                                              ▼
+                           Action Schema Normalizer:
+                           {"click": 35} -> {"click": {"index": 35}}
+                                              │
+                                              ▼
+                           browser-use clicks checkbox -> Verifies "Success"
+                                              │
+                                              ▼
+                           Challenge Cleared -> Control returns to Provider
+```
+
+### Why Normalization Matters
+Local and lightweight vision models (like `gemma4:31b-cloud`) often output shorthand actions (e.g., `{"click": 35}`) rather than the deeply nested Pydantic schemas required by `browser-use`. The integration in `browser_use.llm.ollama.chat` includes an automatic action schema normalizer (`_normalize_ollama_actions`) that translates shorthand instructions into valid action models on the fly.
+
+---
+
+## 🧩 Provider Implementation Matrix
+
+| Provider | Base URL | Input Automation Strategy | Streaming & Completion Detection | Special Capabilities |
+|---|---|---|---|---|
+| **Google Gemini** | `gemini.google.com/app` | Quill editor via `execCommand('insertText')` | Monitors `.stop-button` and `mat-icon[fonticon='stop']` | Imagen diffusion image generation, high-res HTML5 Canvas extraction |
+| **ChatGPT** | `chatgpt.com` | TipTap contenteditable composer with synthetic input events | Detects stop button presence (avoids false-positive dormant pulse classes) | Native Web Search (`search_chatgpt`), DALL-E 3 image generation |
+| **Claude** | `claude.ai/new` | ProseMirror input area with session isolation | Observes streaming cursor and response container mutations | Strict `/new` chat isolation, Claude Sonnet formatting |
+| **DeepSeek** | `chat.deepseek.com` | Native `HTMLTextAreaElement.prototype` value setter | Detects completion of reasoning blocks and stop button clearance | DeepThink reasoning mode, DeepSeek Web Search |
+| **Google Search** | `google.com` | Direct URL navigation (`/search?q=...`) | Fast page load and DOM readiness detection | Scrapes organic search results (clean URLs, snippets) + Google AI Overviews |
+
+---
+
+## 🛠️ First-Time Setup Guide
+
+### 1. Install System Prerequisites
+- **Python 3.10+** (Anaconda or standard virtualenv)
+- **Google Chrome** installed in standard Windows location
+- **Ollama** installed and running (for autonomous CAPTCHA solving):
+  ```cmd
+  ollama serve
+  ollama pull gemma4:31b-cloud
+  ```
+
+### 2. Install Python Dependencies
 ```cmd
+cd BrowserApi
 pip install -r requirements.txt
+playwright install chromium
 ```
 
-### Step 2: Open Chrome in Headed Mode
-Run the provided batch file:
-```cmd
-start_chrome.bat
-```
-*(This launches Chrome with the persistent profile at `C:\mcp-browser-profile` and opens port `9222`).*
-
-### Step 3: Log In to All 4 Services
-In the Chrome browser window that just opened, navigate to and log in to each service:
-- **Google Gemini**: [https://gemini.google.com/app](https://gemini.google.com/app)
-- **ChatGPT**: [https://chatgpt.com/](https://chatgpt.com/)
-- **Claude**: [https://claude.ai/](https://claude.ai/)
-- **DeepSeek**: [https://chat.deepseek.com/](https://chat.deepseek.com/)
-
-Make sure you can see the main chat interface on each website and that "Remember Me" / persistent login is enabled.
-
-### Step 4: Install and Configure NopeCHA (Auto-CAPTCHA Solver)
-To solve Cloudflare Turnstile and security challenges automatically:
-1. In the same Chrome window, visit the Chrome Web Store:
-   [NopeCHA: CAPTCHA Solver Extension](https://chromewebstore.google.com/detail/nopecha-captcha-solver/dknlfmjaanfblgfdefebhijalfmhmmjjo)
-2. Click **Add to Chrome**.
-3. Once installed, click the NopeCHA puzzle icon in your browser toolbar:
-   - Add your NopeCHA API key (free tiers are available at [nopecha.com](https://nopecha.com)).
-   - Ensure Cloudflare Turnstile / challenge auto-solving is toggled **ON**.
-4. *(Optional)*: You can also install [Buster: Captcha Solver for Humans](https://chromewebstore.google.com/detail/buster-captcha-solver-for/mpbjkejclgfgadiemmefgebjfooflfhl) as an extra fallback.
-
-### Step 5: Close the Chrome Window
-Close the Chrome window completely. All your logins, cookies, and installed extensions are now permanently saved in `C:\mcp-browser-profile`.
+### 3. One-Time Login (Profile Initialization)
+To allow Chrome to save your session cookies permanently:
+1. Run the helper script:
+   ```cmd
+   start_chrome.bat
+   ```
+2. A visible Chrome window will open using the profile directory at `C:\mcp-browser-profile`.
+3. Log in to each provider:
+   - [Gemini](https://gemini.google.com/app)
+   - [ChatGPT](https://chatgpt.com/)
+   - [Claude](https://claude.ai/)
+   - [DeepSeek](https://chat.deepseek.com/)
+4. Once you are logged in and can see the chat interface on each, close the Chrome window.
 
 ---
 
 ## 🚀 Running the MCP Server
 
-### Option A: Server-Sent Events (SSE) Mode (Default)
-Run:
+### Mode 1: Server-Sent Events (SSE) — Default
+Runs a persistent HTTP/SSE server accessible by network or multi-client setups:
 ```cmd
 python server.py
 ```
-- Chrome is automatically launched **headlessly** on port `9222`.
-- FastMCP exposes the SSE server at **`http://127.0.0.1:8000/sse`**.
+- Starts the SSE server on **`http://127.0.0.1:8000/sse`**.
+- Automatically launches Chrome in the background on port `9222`.
 
-### Option B: Stdio Mode (For Desktop AI Clients)
-To integrate directly with Claude Desktop, Cursor, or Antigravity IDE:
+### Mode 2: Standard I/O (Stdio) — For AI Desktop Clients
+Runs directly via process stdin/stdout:
 ```cmd
 python server.py --stdio
 ```
 
-#### Claude Desktop Configuration (`claude_desktop_config.json`):
+---
+
+## 💻 MCP Client Configuration
+
+### Claude Desktop (`claude_desktop_config.json`)
 ```json
 {
   "mcpServers": {
     "browser-agent": {
       "command": "python",
-      "args": ["C:\\Users\\CT_USER\\Desktop\\BrowserApi\\server.py", "--stdio"]
+      "args": [
+        "C:\\Users\\CT_USER\\Desktop\\BrowserApi\\server.py",
+        "--stdio"
+      ]
     }
   }
 }
 ```
 
----
+### Cursor / Antigravity IDE
+Add the server under **MCP Settings**:
+- **Name**: `browser-agent`
+- **Transport**: `stdio`
+- **Command**: `python C:\Users\CT_USER\Desktop\BrowserApi\server.py --stdio`
 
-## 🧪 Testing with `test.py`
-
-You can test any provider, web search, or image generation directly from the command line using `test.py`:
-
-### 1. Check Server & Provider Health
-Verify that Chrome is running and all 4 providers are authenticated:
-```cmd
-python test.py
-```
-
-### 2. Chat with Any Provider
-```cmd
-# Google Gemini
-python test.py --provider=gemini "What is the speed of light?"
-
-# OpenAI ChatGPT
-python test.py --provider=chatgpt "Explain quantum computing in simple terms."
-
-# Anthropic Claude
-python test.py --provider=claude "Write a haiku about the moon."
-
-# DeepSeek
-python test.py --provider=deepseek "Write a Python binary search function."
-```
-
-### 3. Live Web Search (Google, ChatGPT & DeepSeek)
-Search the live web with synthesized responses and source citations:
-```cmd
-# Direct Google Search (ultra-fast, extracted organic results + AI Overview):
-python test.py --google "Latest stock market trend and AI news"
-
-# Search via search_web (defaults to Google Search):
-python test.py --search "NVIDIA stock performance today"
-
-# Search via ChatGPT Web Search:
-python test.py --provider=chatgpt --search "What is today's date and current market trend?"
-
-# Search via DeepSeek Web Search:
-python test.py --provider=deepseek --search "Artificial intelligence breakthroughs"
-```
-
-### 4. Image Generation (Gemini & ChatGPT)
-Images are generated, downloaded, and saved to `data/outputs/` as full-resolution PNG files:
-```cmd
-# Generate image via Google Gemini Imagen diffusion:
-python test.py --image "A futuristic cyberpunk sports car speeding through a glowing neon city"
-
-# Generate image via ChatGPT DALL-E 3:
-python test.py --provider=chatgpt --image "A vintage steam locomotive crossing a bridge in a snowstorm"
-```
+*(Alternatively, connect via SSE to `http://127.0.0.1:8000/sse`)*
 
 ---
 
 ## 🧰 Available MCP Tools Reference
 
-| Tool Name | Parameters | Description |
-| :--- | :--- | :--- |
-| `health_check()` | None | Checks server status, Chrome port 9222, and login status across Gemini, ChatGPT, Claude, DeepSeek, and Google. |
-| `search_google` | `query: str`, `num_results: int = 10`, `timeout: int = 60` | Direct Google Web Search; extracts organic results (titles, links, snippets) and AI Overviews. |
-| `search_web` | `query: str`, `provider: str = "google"`, `timeout: int = 120` | Unified web search router (`provider`: `'google'` [default], `'chatgpt'`, `'deepseek'`, or `'gemini'`). |
-| `ask_gemini` | `prompt: str`, `timeout: int = 120` | Starts a new chat session with Google Gemini. Automatically detects image requests. |
-| `generate_image_gemini` | `prompt: str`, `output_name: str = ""`, `timeout: int = 180` | Generates an image using Gemini Imagen diffusion and downloads high-res PNG to `data/outputs/`. |
-| `ask_chatgpt` | `prompt: str`, `timeout: int = 120`, `web_search: bool = False` | Queries ChatGPT (`gpt-5-6`) in an isolated session with optional web search toggle. |
-| `search_chatgpt` | `query: str`, `timeout: int = 120` | Searches the web using ChatGPT's built-in search engine; returns synthesized answer with citations. |
-| `generate_image_chatgpt` | `prompt: str`, `output_name: str = ""`, `timeout: int = 180` | Generates an image via ChatGPT DALL-E 3 and saves it to `data/outputs/`. |
-| `ask_claude` | `prompt: str`, `timeout: int = 120` | Queries Claude (Anthropic) in a fresh session with TipTap/ProseMirror automation. |
-| `ask_deepseek` | `prompt: str`, `timeout: int = 120`, `web_search: bool = False`, `deepthink: bool = False` | Queries DeepSeek with optional Web Search or DeepThink reasoning mode. |
-| `search_deepseek` | `query: str`, `timeout: int = 120` | Searches the web using DeepSeek Search with source synthesis. |
+| Tool | Parameters | Description |
+|---|---|---|
+| **`health_check`** | *None* | Returns the real-time health of the server, Chrome port `9222`, login status for all 4 providers, and Ollama status. |
+| **`search_google`** | `query: str`<br>`num_results: int = 10`<br>`timeout: int = 60` | Direct Google Search; returns organic search results (titles, links, snippets) and Google AI Overview synthesis. |
+| **`search_web`** | `query: str`<br>`provider: str = "google"`<br>`timeout: int = 120` | Unified web search router. Options for `provider`: `'google'`, `'chatgpt'`, `'deepseek'`, `'gemini'`. |
+| **`ask_gemini`** | `prompt: str`<br>`timeout: int = 120` | Queries Google Gemini in a clean session. Automatically detects image generation requests. |
+| **`generate_image_gemini`** | `prompt: str`<br>`output_name: str = ""` | Generates an image using Gemini Imagen diffusion and downloads high-res PNG to `data/outputs/`. |
+| **`ask_chatgpt`** | `prompt: str`<br>`timeout: int = 120`<br>`web_search: bool = False` | Queries ChatGPT Free / Plus in an isolated session with optional web search synthesis. |
+| **`search_chatgpt`** | `query: str`<br>`timeout: int = 120` | Searches the web using ChatGPT's built-in search engine; returns answer with citations. |
+| **`generate_image_chatgpt`** | `prompt: str`<br>`output_name: str = ""` | Generates an image via ChatGPT DALL-E 3 and saves it to `data/outputs/`. |
+| **`ask_claude`** | `prompt: str`<br>`timeout: int = 120` | Queries Anthropic Claude in a fresh `/new` chat session. |
+| **`ask_deepseek`** | `prompt: str`<br>`timeout: int = 120`<br>`web_search: bool = False`<br>`deepthink: bool = False` | Queries DeepSeek with optional live Web Search or DeepThink reasoning mode. |
+| **`search_deepseek`** | `query: str`<br>`timeout: int = 120` | Searches the live web using DeepSeek's search pipeline. |
 
 ---
 
-## 📁 Directory Structure
+## 🧪 CLI Testing Suite
+
+The project includes test and diagnostic scripts:
+
+### 1. Provider & Search Tests (`test.py`)
+```cmd
+# Health check across all providers
+python test.py
+
+# Chat with individual providers
+python test.py --provider=gemini "Explain quantum entanglement in 2 sentences"
+python test.py --provider=chatgpt "Summarize the history of space flight"
+python test.py --provider=claude "Write a haiku about autumn"
+python test.py --provider=deepseek "Write an async queue in Python"
+
+# Web search tests
+python test.py --search "Latest Mars rover discoveries"
+python test.py --provider=deepseek --search "Quantum computing breakthroughs"
+
+# Image generation tests
+python test.py --image "A photorealistic red fox in a snowy forest"
+python test.py --provider=chatgpt --image "A futuristic cyberpunk city at dusk"
+```
+
+### 2. Autonomous CAPTCHA Solver Diagnostic (`test_vision_solver.py`)
+```cmd
+# Verify Ollama endpoint connectivity and model tags
+python test_vision_solver.py --check-only
+
+# Run live end-to-end CAPTCHA test against Cloudflare Turnstile demo
+python test_vision_solver.py
+```
+
+---
+
+## 📁 Project Directory Structure
 
 ```text
 BrowserApi/
 ├── app/
 │   ├── __init__.py
-│   ├── config.py                 # Configuration (ports, URLs, timeouts, headless flag)
-│   ├── browser.py                # Headless Chrome auto-launcher, Selenium manager, CDP stealth hooks
-│   ├── parsers.py                # Structured response schemas (text, image, error)
+│   ├── browser.py               # Chrome lifecycle manager, Selenium attachment, CDP stealth
+│   ├── captcha_solver.py        # 2-Tier Vision CAPTCHA solver (Fast DOM + browser-use Ollama)
+│   ├── config.py                # Environment variables, timeouts, ports, model names
+│   ├── parsers.py               # Standardized JSON response envelope helpers
 │   └── providers/
-│       ├── __init__.py
-│       ├── base.py               # Abstract BrowserProvider base class
-│       ├── google.py             # Direct Google Search automation & AI Overview scraper
-│       ├── gemini.py             # Google Gemini automation (Quill execCommand & Imagen extraction)
-│       ├── chatgpt.py            # ChatGPT automation (TipTap contenteditable, Search, DALL-E 3)
-│       ├── claude.py             # Claude automation (ProseMirror input & Cloudflare handling)
-│       └── deepseek.py           # DeepSeek automation (Native DOM prototype, Search, DeepThink)
+│       ├── __init__.py          # Provider factory and registry
+│       ├── base.py              # Base abstract BrowserProvider class
+│       ├── chatgpt.py           # ChatGPT automation (TipTap, Search, DALL-E 3)
+│       ├── claude.py            # Claude automation (ProseMirror, Turnstile defense)
+│       ├── deepseek.py          # DeepSeek automation (DOM prototype, DeepThink, Search)
+│       ├── gemini.py            # Google Gemini automation (Quill, Imagen diffusion)
+│       └── google.py            # Direct Google Search & AI Overview scraper
 ├── data/
-│   ├── outputs/                  # Downloaded generated images (.png)
-│   ├── screenshots/              # Error & diagnostic screenshots (.png)
-│   └── logs/                     # Execution logs (browser_mcp.log)
-├── server.py                     # FastMCP Server (SSE on port 8000, or --stdio)
-├── test.py                       # Test client for all 11 tools and 5 providers
-├── start_chrome.bat              # Batch script to launch Chrome in visible mode for initial setup
-├── requirements.txt              # Project dependencies
-├── .gitignore
-└── README.md
+│   ├── logs/                    # Runtime application logs (browser_mcp.log)
+│   ├── outputs/                 # Generated full-resolution images (.png)
+│   └── screenshots/             # Diagnostic screenshots (ignored in git)
+├── server.py                    # Main FastMCP server (exposes 11 tools via SSE / stdio)
+├── start_chrome.bat             # Helper script to launch Chrome headed for one-time login
+├── test.py                      # Multi-provider CLI verification client
+├── test_vision_solver.py        # Standalone vision CAPTCHA solver test script
+├── requirements.txt             # Python dependencies
+├── .gitignore                   # Ignores temp caches, profiles, logs, and generated images
+└── README.md                    # Comprehensive documentation and flow definition
 ```
 
 ---
 
-## 🔧 Troubleshooting & Tips
+## 🔧 Troubleshooting & FAQ
 
-- **Session Expired / Logged Out**:
-  If a service logs you out, simply run `start_chrome.bat`, log in again in the Chrome window, close it, and restart `python server.py`.
-- **Cloudflare Challenges**:
-  The server masks automation flags (`--disable-blink-features=AutomationControlled` and custom desktop User-Agent). If Cloudflare presents a challenge, the server auto-clicks the "Verify you are human" button and allows the installed NopeCHA extension to solve it.
-- **Port 9222 Already in Use**:
-  If a previous Chrome instance is lingering on port 9222:
-  ```cmd
-  taskkill /F /IM chrome.exe
-  ```
-- **Custom Timeouts**:
-  Complex reasoning (DeepThink) or diffusion image generation can take up to 60-90 seconds. You can pass custom timeouts in tool calls:
-  `ask_deepseek(prompt="...", deepthink=True, timeout=180)`.
+#### Q: How does Chrome stay logged in?
+Chrome uses the persistent directory `C:\mcp-browser-profile`. All cookies, localStorage, and authentication tokens persist across reboots.
+
+#### Q: A provider logged me out. What do I do?
+1. Close any running `python server.py`.
+2. Run `start_chrome.bat`.
+3. Log in again in the Chrome window that opens.
+4. Close Chrome and restart `python server.py`.
+
+#### Q: Can I run Chrome in visible (headed) mode for debugging?
+Yes. In [app/config.py](file:///c:/Users/CT_USER/Desktop/BrowserApi/app/config.py), set:
+```python
+chrome_headless: bool = False
+```
+Chrome will run in a visible window so you can watch actions occur in real time.
+
+#### Q: Does CAPTCHA solving slow down normal requests?
+No. `is_captcha_present()` runs lightweight DOM checks that execute in under a millisecond. The vision agent is only activated on-demand when a challenge is verified to be blocking the page.

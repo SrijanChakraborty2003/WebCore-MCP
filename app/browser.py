@@ -86,11 +86,38 @@ class BrowserManager:
     def ensure_chrome_running(self, headless: Optional[bool] = None, max_wait_seconds: int = 8) -> bool:
         """
         Check if Chrome is running on debugging port.
-        If not, attempt to launch Chrome automatically (headlessly by default).
+        If running in a different mode (headless vs headed) than requested, restart it.
+        If not running, attempt to launch Chrome automatically.
         """
+        is_headless = settings.chrome_headless if headless is None else headless
+        mode_str = "headlessly" if is_headless else "in headed mode"
+
+        # Check if Chrome is already running on port
         if self.is_port_open(settings.debugger_host, settings.debugger_port):
-            logger.info(f"Chrome is already running on {settings.debugger_address}.")
-            return True
+            try:
+                import psutil
+                mismatched = False
+                for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+                    try:
+                        name = p.info.get('name') or ''
+                        cmdline = p.info.get('cmdline') or []
+                        if 'chrome' in name.lower() and any(str(settings.debugger_port) in arg for arg in cmdline):
+                            has_headless_flag = any('--headless' in arg for arg in cmdline)
+                            if has_headless_flag != is_headless:
+                                curr_mode = "headless" if has_headless_flag else "headed"
+                                logger.info(f"Chrome is running on port {settings.debugger_port} in {curr_mode} mode instead of requested {mode_str}. Restarting...")
+                                p.kill()
+                                mismatched = True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+                if mismatched:
+                    time.sleep(1.0)
+                else:
+                    logger.info(f"Chrome is already running on {settings.debugger_address} ({mode_str}).")
+                    return True
+            except Exception as e:
+                logger.debug(f"Could not inspect running Chrome process mode: {e}")
+                return True
 
         chrome_exe = self.find_chrome_executable()
         if not chrome_exe:
@@ -100,8 +127,6 @@ class BrowserManager:
         profile_dir = Path(settings.chrome_profile_dir)
         profile_dir.mkdir(parents=True, exist_ok=True)
 
-        is_headless = settings.chrome_headless if headless is None else headless
-        mode_str = "headlessly" if is_headless else "in headed mode"
         logger.info(f"Auto-launching Chrome {mode_str} on port {settings.debugger_port}...")
 
         cmd = [
@@ -109,6 +134,9 @@ class BrowserManager:
             f"--remote-debugging-port={settings.debugger_port}",
             f"--user-data-dir={settings.chrome_profile_dir}",
             "--disable-blink-features=AutomationControlled",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--ignore-certificate-errors",
         ]
 
         if is_headless:
@@ -117,8 +145,6 @@ class BrowserManager:
                 "--disable-gpu",
                 f"--user-agent={DEFAULT_USER_AGENT}",
                 "--window-size=1920,1080",
-                "--no-first-run",
-                "--no-default-browser-check",
                 "--disable-notifications",
                 "--disable-popup-blocking",
             ])
@@ -190,9 +216,16 @@ class BrowserManager:
                     "Page.addScriptToEvaluateOnNewDocument",
                     {
                         "source": """
-                            Object.defineProperty(navigator, 'webdriver', {
-                                get: () => undefined
-                            });
+                            try {
+                                Object.defineProperty(Object.getPrototypeOf(navigator), 'webdriver', {
+                                    get: () => undefined,
+                                    configurable: true
+                                });
+                            } catch (e) {
+                                try {
+                                    delete Object.getPrototypeOf(navigator).webdriver;
+                                } catch (e2) {}
+                            }
                         """
                     }
                 )

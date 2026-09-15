@@ -9,8 +9,9 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
-from app.browser import logger, DEFAULT_USER_AGENT
 from app.config import settings
+from app.browser import DEFAULT_USER_AGENT, logger
+from app.captcha_solver import VisionCaptchaSolver
 from app.parsers import format_text_success, format_image_success, format_error
 from app.providers.base import BrowserProvider
 
@@ -61,31 +62,12 @@ class ChatGPTBrowser(BrowserProvider):
         except Exception:
             pass
 
-    def _wait_for_cloudflare(self, timeout: int = 20) -> bool:
-        """Handle Cloudflare 'Just a moment...' challenge if encountered."""
-        end_time = time.time() + timeout
-        while time.time() < end_time:
-            title = (self.driver.title or "").lower()
-            url = (self.driver.current_url or "").lower()
-            if "just a moment" not in title and "challenge" not in url:
-                return True
-            logger.info(f"[{self.provider_name}] Cloudflare challenge detected ('{self.driver.title}'). Attempting auto-resolution...")
-            try:
-                clicked = self.driver.execute_script("""
-                    var btn = document.querySelector(".main-content input[type='button'], .main-content input[type='submit'], input[value*='Verify' i]");
-                    if (btn && btn.offsetWidth > 0) {
-                        btn.click();
-                        return true;
-                    }
-                    return false;
-                """)
-                if clicked:
-                    logger.info(f"[{self.provider_name}] Clicked 'Verify you are human' button.")
-                    time.sleep(2.0)
-            except Exception:
-                pass
-            time.sleep(1.0)
-        return "just a moment" not in (self.driver.title or "").lower()
+    def _wait_for_cloudflare(self, timeout: int = 25) -> bool:
+        """Handle Cloudflare or CAPTCHA challenge if encountered using VisionCaptchaSolver."""
+        if VisionCaptchaSolver.is_captcha_present(self.driver):
+            logger.info(f"[{self.provider_name}] Cloudflare challenge detected ('{self.driver.title}'). Activating VisionCaptchaSolver...")
+            return VisionCaptchaSolver.solve_if_needed(self.driver, timeout=timeout)
+        return True
 
     def new_chat(self) -> None:
         """Start a fresh chat session on ChatGPT."""

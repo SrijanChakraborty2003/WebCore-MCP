@@ -7,6 +7,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 from app.browser import logger, DEFAULT_USER_AGENT
 from app.config import settings
+from app.captcha_solver import VisionCaptchaSolver
 from app.parsers import format_text_success, format_error
 from app.providers.base import BrowserProvider
 
@@ -75,29 +76,12 @@ class ClaudeBrowser(BrowserProvider):
         except Exception:
             return False
 
-    def _wait_for_cloudflare(self, timeout: int = 20) -> bool:
-        """Handle Cloudflare 'Just a moment...' or 'Verifying you are human' challenge."""
-        end_time = time.time() + timeout
-        while time.time() < end_time:
-            if not self._is_captcha_active():
-                return True
-            logger.info(f"[{self.provider_name}] Cloudflare challenge detected ('{self.driver.title}'). Attempting auto-resolution...")
-            try:
-                clicked = self.driver.execute_script("""
-                    var btn = document.querySelector(".main-content input[type='button'], .main-content input[type='submit'], input[value*='Verify' i], button[id*='challenge']");
-                    if (btn && btn.offsetWidth > 0) {
-                        btn.click();
-                        return true;
-                    }
-                    return false;
-                """)
-                if clicked:
-                    logger.info(f"[{self.provider_name}] Clicked verify button.")
-                    time.sleep(2.0)
-            except Exception:
-                pass
-            time.sleep(1.0)
-        return not self._is_captcha_active()
+    def _wait_for_cloudflare(self, timeout: int = 25) -> bool:
+        """Handle Cloudflare 'Just a moment...' or 'Verifying you are human' challenge with VisionCaptchaSolver."""
+        if self._is_captcha_active():
+            logger.info(f"[{self.provider_name}] Cloudflare challenge detected ('{self.driver.title}'). Activating VisionCaptchaSolver...")
+            return VisionCaptchaSolver.solve_if_needed(self.driver, timeout=timeout)
+        return True
 
     def new_chat(self) -> None:
         """Start a fresh chat on Claude."""
